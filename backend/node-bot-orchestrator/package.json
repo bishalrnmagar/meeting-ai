@@ -1,0 +1,24 @@
+{
+  "name": "meeting-bot-orchestrator",
+  "version": "1.0.0",
+  "description": "Bot orchestrator for joining Zoom/Google Meet and capturing audio",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "@deepgram/sdk": "^3.5.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ioredis": "^5.4.1",
+    "puppeteer": "^22.12.0",
+    "uuid": "^10.0.0",
+    "ws": "^8.17.1"
+  },
+  "devDependencies": {
+    "eslint": "^9.5.0"
+  }
+}

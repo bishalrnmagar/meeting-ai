@@ -1,0 +1,13 @@
+node_modules/
+venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.yarn/
+uv.lock
