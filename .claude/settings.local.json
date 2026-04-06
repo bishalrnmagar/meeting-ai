@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm ls:*)",
+      "Bash(yarn add:*)",
+      "Bash(yarn install:*)",
+      "Bash(npx playwright:*)"
+    ]
+  }
+}

@@ -11,3 +11,6 @@ build/
 .mypy_cache/
 .yarn/
 uv.lock
+.chrome-profile/
+debug-meet-*.png
+.claudecodeignore

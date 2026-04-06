@@ -42,14 +42,20 @@ function init(server) {
 
 function broadcast(meetingId, data) {
   const clients = meetingClients.get(meetingId);
-  if (!clients) return;
+  if (!clients || clients.size === 0) {
+    console.log(`[WS] No clients connected for meeting ${meetingId}, skipping broadcast`);
+    return;
+  }
 
   const message = JSON.stringify(data);
+  let sentCount = 0;
   for (const ws of clients) {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(message);
+      sentCount++;
     }
   }
+  console.log(`[WS] Broadcast to ${sentCount}/${clients.size} clients for meeting ${meetingId}`);
 }
 
 module.exports = { init, broadcast };

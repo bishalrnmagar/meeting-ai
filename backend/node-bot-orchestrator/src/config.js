@@ -8,4 +8,5 @@ module.exports = {
   zoomJwtToken: process.env.ZOOM_JWT_TOKEN || "",
   googleMeetHeadless: process.env.GOOGLE_MEET_HEADLESS === "true",
   pythonApiUrl: process.env.PYTHON_API_URL || "http://localhost:8000",
+  googleBotName: process.env.GOOGLE_BOT_NAME || "Meeting Assistant",
 };

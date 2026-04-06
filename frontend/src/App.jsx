@@ -42,17 +42,59 @@ const styles = {
     fontWeight: 600,
     cursor: "pointer",
   },
+  buttonDisabled: {
+    padding: "0.75rem 1.5rem",
+    borderRadius: "8px",
+    border: "none",
+    background: "#555",
+    color: "#999",
+    fontSize: "1rem",
+    fontWeight: 600,
+    cursor: "not-allowed",
+  },
+  error: {
+    color: "#f44336",
+    fontSize: "0.9rem",
+    marginBottom: "1rem",
+  },
 };
 
 export default function App() {
-  const [meetingId, setMeetingId] = useState("");
+  const [meetingUrl, setMeetingUrl] = useState("");
   const [activeMeetingId, setActiveMeetingId] = useState(null);
-  const { captions, connected } = useCaptions(activeMeetingId);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const { captions, connected, participantCount } = useCaptions(activeMeetingId);
 
-  const handleJoin = (e) => {
+  const handleJoin = async (e) => {
     e.preventDefault();
-    if (meetingId.trim()) {
-      setActiveMeetingId(meetingId.trim());
+    const url = meetingUrl.trim();
+    if (!url) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      // Call the Python API to create the meeting and trigger the bot
+      const resp = await fetch("/api/v1/meetings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ meeting_url: url }),
+      });
+
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        throw new Error(data.detail || `Server error: ${resp.status}`);
+      }
+
+      const meeting = await resp.json();
+      console.log("[App] Meeting created, bot starting:", meeting);
+      setActiveMeetingId(meeting.id);
+    } catch (err) {
+      console.error("[App] Failed to start meeting:", err);
+      setError(err.message);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -67,18 +109,28 @@ export default function App() {
         <input
           style={styles.input}
           type="text"
-          placeholder="Enter meeting ID to view captions..."
-          value={meetingId}
-          onChange={(e) => setMeetingId(e.target.value)}
+          placeholder="Paste a Zoom or Google Meet link..."
+          value={meetingUrl}
+          onChange={(e) => setMeetingUrl(e.target.value)}
         />
-        <button style={styles.button} type="submit">
-          Connect
+        <button
+          style={loading ? styles.buttonDisabled : styles.button}
+          type="submit"
+          disabled={loading}
+        >
+          {loading ? "Joining..." : "Join Meeting"}
         </button>
       </form>
 
+      {error && <div style={styles.error}>{error}</div>}
+
       {activeMeetingId && (
         <>
-          <MeetingStatus meetingId={activeMeetingId} connected={connected} />
+          <MeetingStatus
+            meetingId={activeMeetingId}
+            connected={connected}
+            participantCount={participantCount}
+          />
           <CaptionOverlay captions={captions} />
         </>
       )}

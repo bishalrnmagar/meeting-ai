@@ -26,6 +26,7 @@ class ZoomBot extends BaseBot {
     // await ZoomMtg.join({ ... });
 
     this.status = "in_meeting";
+    console.log(`[ZoomBot] ✔ Bot joined meeting | meetingId=${this.meetingId} | platform=${this.platform}`);
 
     // Start audio processing pipeline
     audioProcessor.startProcessing(this.meetingId, this);
@@ -34,7 +35,7 @@ class ZoomBot extends BaseBot {
   }
 
   async leave() {
-    console.log(`[ZoomBot] Leaving meeting: ${this.meetingId}`);
+    console.log(`[ZoomBot] Leaving meeting | meetingId=${this.meetingId} | platform=${this.platform}`);
     audioProcessor.stopProcessing(this.meetingId);
     this.status = "left";
     this.connection = null;

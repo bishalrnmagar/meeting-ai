@@ -30,11 +30,15 @@ async function startBot(meetingId, meetingUrl, platform) {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       await bot.join();
-      console.log(`[BotManager] Bot joined meeting ${meetingId} (attempt ${attempt})`);
+      console.log(`[BotManager] ✔ Bot joined | meetingId=${meetingId} | platform=${platform} | attempt=${attempt}`);
       return { meetingId, status: "joined", platform };
     } catch (err) {
       lastError = err;
       console.error(`[BotManager] Join attempt ${attempt} failed for ${meetingId}:`, err.message);
+      // Clean up browser so the next attempt can reuse the profile directory
+      try { await bot.leave(); } catch { /* ignore cleanup errors */ }
+      // Don't retry errors that will never succeed (blocked, ended, invalid code)
+      if (err.noRetry) break;
       if (attempt < MAX_RETRIES) {
         const delay = RETRY_BASE_MS * Math.pow(2, attempt - 1);
         await new Promise((r) => setTimeout(r, delay));
@@ -54,7 +58,7 @@ async function stopBot(meetingId) {
 
   await bot.leave();
   sessionStore.delete(meetingId);
-  console.log(`[BotManager] Bot left meeting ${meetingId}`);
+  console.log(`[BotManager] Bot left | meetingId=${meetingId} | platform=${bot.platform}`);
 
   // Notify Python API that meeting ended
   try {

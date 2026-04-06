@@ -1,0 +1,48 @@
+# --- 1. Global Heavy Hitters ---
+node_modules/
+.git/
+.next/
+.turbo/
+dist/
+build/
+out/
+.cache/
+*.log
+*.lock
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# --- 2. Heavy Assets ---
+**/*.jpg
+**/*.png
+**/*.svg
+**/*.pdf
+**/*.mp4
+public/assets/
+
+# --- 3. Ignore Other Packages (The Monorepo Trick) ---
+# If you are working on 'apps/web', ignore everything else to save tokens.
+# Uncomment these as needed:
+
+# apps/docs/
+# apps/mobile/
+# packages/legacy-ui/
+# packages/internal-tests/
+
+# --- 4. Documentation & Configs ---
+# Usually safe to keep, but ignore if they are massive
+# docs/
+
+**/tsconfig.json
+**/jest.config.js
+**/.eslintrc.js
+
+.venv/
+
+uv.lock
+pyproject.toml
+
+yarn.lock
+__pycache__/
+.env

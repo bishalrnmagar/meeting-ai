@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 
 import httpx
@@ -12,6 +13,27 @@ from app.services.meeting_service import create_meeting, get_meeting, list_meeti
 router = APIRouter(prefix="/meetings", tags=["meetings"])
 
 
+async def _notify_bot_orchestrator(meeting_id: str, meeting_url: str, platform: str):
+    """Fire-and-forget: tell the bot orchestrator to join the meeting."""
+    settings = get_settings()
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "http://localhost:3001/internal/bots/start",
+                json={"meeting_id": meeting_id, "meeting_url": meeting_url, "platform": platform},
+                headers={"X-API-Key": settings.internal_api_key},
+                timeout=120,
+            )
+            if resp.status_code != 200:
+                print(f"[Meetings] Bot orchestrator returned {resp.status_code}: {resp.text}")
+            else:
+                print(f"[Meetings] Bot joined successfully for {meeting_id}")
+    except httpx.ConnectError:
+        print("[Meetings] Bot orchestrator is not running — bot will not join")
+    except Exception as e:
+        print(f"[Meetings] Failed to notify bot orchestrator: {e}")
+
+
 @router.post("", response_model=MeetingResponse, status_code=201)
 async def schedule_meeting(body: MeetingCreate, db: AsyncSession = Depends(get_db)):
     try:
@@ -19,18 +41,10 @@ async def schedule_meeting(body: MeetingCreate, db: AsyncSession = Depends(get_d
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Notify bot orchestrator to join
-    settings = get_settings()
-    try:
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                "http://localhost:3001/internal/bots/start",
-                json={"meeting_id": str(meeting.id), "meeting_url": meeting.meeting_url, "platform": meeting.platform},
-                headers={"X-API-Key": settings.internal_api_key},
-                timeout=10,
-            )
-    except Exception:
-        pass  # Bot orchestrator may not be running; meeting is still created
+    # Notify bot orchestrator in the background — don't block the response
+    asyncio.create_task(
+        _notify_bot_orchestrator(str(meeting.id), meeting.meeting_url, meeting.platform)
+    )
 
     return meeting
 

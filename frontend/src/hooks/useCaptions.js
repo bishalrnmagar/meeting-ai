@@ -3,12 +3,13 @@ import { useState, useEffect, useRef, useCallback } from "react";
 export function useCaptions(meetingId) {
   const [captions, setCaptions] = useState([]);
   const [connected, setConnected] = useState(false);
+  const [participantCount, setParticipantCount] = useState(null);
   const wsRef = useRef(null);
 
   const connect = useCallback(() => {
     if (!meetingId) return;
 
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const protocol = window.location.protocol === "wss:" ?? "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws/captions?meetingId=${meetingId}`;
 
     const ws = new WebSocket(wsUrl);
@@ -21,6 +22,12 @@ export function useCaptions(meetingId) {
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
+      console.log("[WS] Message received:", data);
+      // Handle participant count updates
+      if (data.type === "participant_count") {
+        setParticipantCount(data.count);
+        return;
+      }
 
       setCaptions((prev) => {
         // For interim results, replace the last non-final caption from same speaker
@@ -62,5 +69,5 @@ export function useCaptions(meetingId) {
     return disconnect;
   }, [connect, disconnect]);
 
-  return { captions, connected, connect, disconnect };
+  return { captions, connected, participantCount, connect, disconnect };
 }

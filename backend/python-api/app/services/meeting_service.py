@@ -16,8 +16,16 @@ def detect_platform(url: str) -> str:
     raise ValueError(f"Unsupported meeting URL: {url}")
 
 
+def normalize_url(url: str) -> str:
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
+
+
 async def create_meeting(db: AsyncSession, meeting_url: str, title: str | None = None, scheduled_at: datetime | None = None) -> Meeting:
     platform = detect_platform(meeting_url)
+    meeting_url = normalize_url(meeting_url)
     meeting = Meeting(
         meeting_url=meeting_url,
         platform=platform,

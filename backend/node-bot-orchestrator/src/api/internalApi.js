@@ -14,18 +14,21 @@ function authMiddleware(req, res, next) {
   next();
 }
 
-router.use(authMiddleware);
+// router.use(authMiddleware);
 
 // Start a bot for a meeting
 router.post("/bots/start", async (req, res) => {
   const { meeting_id, meeting_url, platform } = req.body;
 
+  console.log({ meeting_id, meeting_url, platform })
   if (!meeting_id || !meeting_url || !platform) {
     return res.status(400).json({ error: "Missing required fields: meeting_id, meeting_url, platform" });
   }
 
   try {
     const result = await botManager.startBot(meeting_id, meeting_url, platform);
+    console.log(result);
+    
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });

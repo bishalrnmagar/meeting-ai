@@ -5,6 +5,14 @@ const config = require("./config");
 const internalApi = require("./api/internalApi");
 const websocketHandler = require("./streaming/websocketHandler");
 
+// Catch unhandled errors to prevent crashes
+process.on("uncaughtException", (err) => {
+  console.error("[Process] Uncaught exception:", err.message);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[Process] Unhandled rejection:", reason);
+});
+
 const app = express();
 app.use(cors());
 app.use(express.json());
