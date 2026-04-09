@@ -44,6 +44,7 @@ function startProcessing(meetingId, bot) {
     console.log(`[AudioProcessor] Transcript received for ${meetingId}: "${transcript.transcript}" (final=${data.is_final})`);
 
     const caption = {
+      type: "caption",
       meeting_id: meetingId,
       speaker: transcript.words?.[0]?.speaker != null
         ? `Speaker ${transcript.words[0].speaker}`
@@ -70,6 +71,24 @@ function startProcessing(meetingId, bot) {
         console.error("[AudioProcessor] Failed to store transcript:", err.message);
       }
     }
+  });
+
+  connection.on(LiveTranscriptionEvents.SpeechStarted, () => {
+    console.log(`[AudioProcessor] Speech started for ${meetingId}`);
+    websocketHandler.broadcast(meetingId, {
+      type: "speaking_started",
+      meeting_id: meetingId,
+      timestamp: Date.now(),
+    });
+  });
+
+  connection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
+    console.log(`[AudioProcessor] Utterance ended for ${meetingId}`);
+    websocketHandler.broadcast(meetingId, {
+      type: "speaking_stopped",
+      meeting_id: meetingId,
+      timestamp: Date.now(),
+    });
   });
 
   connection.on(LiveTranscriptionEvents.Error, (err) => {

@@ -1,50 +1,72 @@
-const { chromium } = require("playwright");
+const puppeteer = require("puppeteer-extra");
+const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+const path = require("path");
 const BaseBot = require("./BaseBot");
 const audioProcessor = require("../streaming/audioProcessor");
 const config = require("../config");
+
+puppeteer.use(StealthPlugin());
 
 class GoogleMeetBot extends BaseBot {
   constructor(meetingUrl, meetingId) {
     super(meetingUrl, meetingId);
     this.platform = "google_meet";
     this.browser = null;
-    this.context = null;
     this.page = null;
     this._mouseMovementInterval = null;
+    this._meetingEndCallback = null;
+  }
+
+  onMeetingEnd(callback) {
+    this._meetingEndCallback = callback;
   }
 
   async join() {
     this.status = "joining";
     console.log(`[GoogleMeetBot] Joining meeting: ${this.meetingUrl}`);
 
-    this.browser = await chromium.launch({
-      headless: config.googleMeetHeadless,
+    const userDataDir = path.join(__dirname, "..", "..", "chrome-profile");
+
+    this.browser = await puppeteer.launch({
+      headless: false,
+      channel: "chrome",
+      userDataDir,
       args: [
         "--use-fake-ui-for-media-stream",
         "--use-fake-device-for-media-stream",
-        "--disable-web-security",
-        "--allow-running-insecure-content",
         "--autoplay-policy=no-user-gesture-required",
         "--no-first-run",
         "--no-default-browser-check",
-        "--disable-blink-features=AutomationControlled",
+        "--window-size=1280,720",
       ],
+      ignoreDefaultArgs: ["--enable-automation"],
+      defaultViewport: { width: 1280, height: 720 },
     });
 
-    this.context = await this.browser.newContext({
-      viewport: { width: 1280, height: 720 },
-      permissions: ["microphone", "camera"],
-      locale: "en-US",
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    });
+    const pages = await this.browser.pages();
+    this.page = pages[0] || (await this.browser.newPage());
 
-    this.page = await this.context.newPage();
+    // Grant mic/camera permissions for Google Meet
+    const context = this.browser.defaultBrowserContext();
+    await context.overridePermissions("https://meet.google.com", [
+      "microphone",
+      "camera",
+      "notifications",
+    ]);
 
-    // Inject WebRTC audio interceptor BEFORE navigating
+    // Sign into Google account if credentials are available and not already signed in
+    await this._signInIfNeeded();
+
+    // Inject WebRTC interceptor via evaluateOnNewDocument (runs on next navigation)
     await this._injectAudioInterceptor();
 
-    await this.page.goto(this.meetingUrl, { waitUntil: "networkidle", timeout: 30000 });
+    await this.page.goto(this.meetingUrl, {
+      waitUntil: "networkidle2",
+      timeout: 30000,
+    });
+
+    // Also inject directly in case evaluateOnNewDocument didn't fire
+    await this._injectAudioInterceptorDirect();
 
     // Start subtle mouse movements to appear human
     this._startMouseMovements();
@@ -52,23 +74,41 @@ class GoogleMeetBot extends BaseBot {
     await this._waitForMeetReady();
 
     // Debug screenshot
-    await this.page.screenshot({ path: `debug-meet-${this.meetingId}.png`, fullPage: true });
-    console.log(`[GoogleMeetBot] Screenshot saved: debug-meet-${this.meetingId}.png`);
+    await this.page.screenshot({
+      path: `debug-meet-${this.meetingId}.png`,
+      fullPage: true,
+    });
+    console.log(
+      `[GoogleMeetBot] Screenshot saved: debug-meet-${this.meetingId}.png`
+    );
     console.log(`[GoogleMeetBot] Page URL: ${this.page.url()}`);
-    console.log(`[GoogleMeetBot] Page title: ${await this.page.title()}`);
+    console.log(
+      `[GoogleMeetBot] Page title: ${await this.page.title()}`
+    );
 
     await this._checkBlocked();
     await this._dismissDialogs();
-    await this._enterGuestName();
+    // Only enter guest name if not signed in
+    if (!config.googleBotEmail || !config.googleBotPassword) {
+      await this._enterGuestName();
+    }
     await this._muteMediaBeforeJoin();
     await this._clickJoinButton();
+    // Re-check for blocks after clicking join
+    await this._sleep(2000);
+    await this._checkBlocked();
     await this._waitForAdmission();
 
     this.status = "in_meeting";
-    console.log(`[GoogleMeetBot] Successfully joined meeting: ${this.meetingId}`);
+    console.log(
+      `[GoogleMeetBot] Successfully joined meeting: ${this.meetingId}`
+    );
 
     await this._startAudioCapture();
     audioProcessor.startProcessing(this.meetingId, this);
+
+    // Monitor for meeting end in the background
+    this._monitorMeetingEnd();
 
     return true;
   }
@@ -81,13 +121,94 @@ class GoogleMeetBot extends BaseBot {
     if (this.browser) {
       await this.browser.close();
       this.browser = null;
-      this.context = null;
       this.page = null;
     }
     this.status = "left";
   }
 
-  // --- Pre-join helpers ---
+  // --- Helpers ---
+
+  _sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  async _findButtonByText(textOrTexts) {
+    const texts = Array.isArray(textOrTexts) ? textOrTexts : [textOrTexts];
+    return await this.page.evaluateHandle((texts) => {
+      const buttons = Array.from(document.querySelectorAll("button"));
+      for (const text of texts) {
+        const btn = buttons.find((b) => b.innerText.trim().toLowerCase().includes(text.toLowerCase()));
+        if (btn) return btn;
+      }
+      return null;
+    }, texts);
+  }
+
+  async _signInIfNeeded() {
+    if (!config.googleBotEmail || !config.googleBotPassword) {
+      console.log("[GoogleMeetBot] No Google credentials configured, joining as guest");
+      return;
+    }
+
+    // Check if already signed in by visiting Google
+    await this.page.goto("https://accounts.google.com", {
+      waitUntil: "networkidle2",
+      timeout: 20000,
+    });
+
+    const currentUrl = this.page.url();
+    // If redirected to myaccount or shows signed-in state, skip login
+    if (currentUrl.includes("myaccount.google.com") || currentUrl.includes("accounts.google.com/SignOutOptions")) {
+      console.log("[GoogleMeetBot] Already signed into Google");
+      return;
+    }
+
+    console.log("[GoogleMeetBot] Signing into Google account...");
+
+    try {
+      // Go to sign-in page
+      await this.page.goto("https://accounts.google.com/signin", {
+        waitUntil: "networkidle2",
+        timeout: 20000,
+      });
+
+      // Enter email
+      const emailInput = await this.page.waitForSelector('input[type="email"]', {
+        timeout: 10000,
+        visible: true,
+      });
+      await emailInput.type(config.googleBotEmail, { delay: 30 });
+      await this._sleep(500);
+
+      // Click Next
+      const nextHandle = await this._findButtonByText("Next");
+      const nextBtn = nextHandle ? nextHandle.asElement() : null;
+      if (nextBtn) await nextBtn.click();
+      await this._sleep(3000);
+
+      // Enter password
+      const passInput = await this.page.waitForSelector('input[type="password"]', {
+        timeout: 10000,
+        visible: true,
+      });
+      await passInput.type(config.googleBotPassword, { delay: 30 });
+      await this._sleep(500);
+
+      // Click Next again
+      const nextHandle2 = await this._findButtonByText("Next");
+      const nextBtn2 = nextHandle2 ? nextHandle2.asElement() : null;
+      if (nextBtn2) await nextBtn2.click();
+
+      // Wait for sign-in to complete
+      await this.page.waitForNavigation({ waitUntil: "networkidle2", timeout: 15000 }).catch(() => {});
+      await this._sleep(2000);
+
+      console.log(`[GoogleMeetBot] Signed in as ${config.googleBotEmail}`);
+    } catch (err) {
+      console.error(`[GoogleMeetBot] Google sign-in failed: ${err.message}`);
+      console.log("[GoogleMeetBot] Proceeding as guest...");
+    }
+  }
 
   async _waitForMeetReady() {
     console.log("[GoogleMeetBot] Waiting for meeting page to be ready...");
@@ -96,7 +217,9 @@ class GoogleMeetBot extends BaseBot {
     const start = Date.now();
 
     while (Date.now() - start < maxWait) {
-      const bodyText = await this.page.textContent("body");
+      const bodyText = await this.page.evaluate(
+        () => document.body.innerText
+      );
 
       if (
         bodyText.includes("You can't join") ||
@@ -111,24 +234,52 @@ class GoogleMeetBot extends BaseBot {
         return;
       }
 
-      await this.page.waitForTimeout(pollInterval);
+      await this._sleep(pollInterval);
     }
 
-    console.log("[GoogleMeetBot] Timed out waiting for 'Getting ready', proceeding...");
+    console.log(
+      "[GoogleMeetBot] Timed out waiting for 'Getting ready', proceeding..."
+    );
   }
 
   async _checkBlocked() {
-    const bodyText = await this.page.textContent("body");
+    const bodyText = await this.page.evaluate(
+      () => document.body.innerText
+    );
 
     const blockers = [
-      { text: "You can't join this video call", msg: "Meeting blocked: host settings prevent this account from joining." },
-      { text: "This meeting has ended", msg: "Meeting has already ended." },
-      { text: "Check your meeting code", msg: "Invalid meeting code." },
-      { text: "not allowed to join", msg: "This account is not allowed to join the meeting." },
+      {
+        text: "You can't join this video call",
+        msg: "Meeting blocked: host settings prevent this account from joining.",
+      },
+      {
+        text: "This meeting has ended",
+        msg: "Meeting has already ended.",
+      },
+      {
+        text: "Check your meeting code",
+        msg: "Invalid meeting code.",
+      },
+      {
+        text: "not allowed to join",
+        msg: "This account is not allowed to join the meeting.",
+      },
     ];
 
     for (const { text, msg } of blockers) {
       if (bodyText.includes(text)) {
+        // Check if we're actually on the block page vs the pre-join lobby
+        // The pre-join lobby has a name input or join button — if those exist, we're NOT blocked
+        const hasNameInput = await this.page.$('input[placeholder="Your name"], input[aria-label="Your name"]');
+        const hasJoinBtn = await this._findButtonByText(["Join now", "Ask to join"]);
+        const joinBtnExists = hasJoinBtn && await hasJoinBtn.asElement();
+        if (hasNameInput || joinBtnExists) {
+          console.log(`[GoogleMeetBot] _checkBlocked: found "${text}" in body but pre-join elements exist — not actually blocked`);
+          return;
+        }
+
+        console.log(`[GoogleMeetBot] _checkBlocked: BLOCKED — "${text}"`);
+        await this.page.screenshot({ path: `debug-blocked-${this.meetingId}.png`, fullPage: true });
         const err = new Error(msg);
         err.noRetry = true;
         throw err;
@@ -140,77 +291,96 @@ class GoogleMeetBot extends BaseBot {
     const dismissTexts = ["Got it", "Dismiss", "OK", "Accept"];
     for (const text of dismissTexts) {
       try {
-        const btn = this.page.getByRole("button", { name: text });
-        if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
-          await btn.click();
-          console.log(`[GoogleMeetBot] Dismissed dialog: "${text}"`);
-          await this.page.waitForTimeout(500);
+        const handle = await this._findButtonByText(text);
+        const btn = handle ? handle.asElement() : null;
+        if (btn) {
+          const visible = await btn.boundingBox();
+          if (visible) {
+            await btn.click();
+            console.log(`[GoogleMeetBot] Dismissed dialog: "${text}"`);
+            await this._sleep(500);
+          }
         }
       } catch {
         // Dialog may not appear
       }
     }
-    await this.page.waitForTimeout(1000);
+    await this._sleep(1000);
   }
 
   async _enterGuestName() {
     const botName = config.googleBotName || "Meeting Assistant";
-    console.log(`[GoogleMeetBot] Looking for guest name input to enter: "${botName}"`);
+    console.log(
+      `[GoogleMeetBot] Looking for guest name input to enter: "${botName}"`
+    );
 
-    // Playwright's getByPlaceholder is the cleanest approach
+    // Try finding input by placeholder "Your name"
     try {
-      const nameInput = this.page.getByPlaceholder("Your name");
-      if (await nameInput.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await nameInput.click();
-        await nameInput.fill("");
+      const nameInput = await this.page.waitForSelector(
+        'input[placeholder="Your name"]',
+        { timeout: 3000, visible: true }
+      );
+      if (nameInput) {
+        await nameInput.click({ clickCount: 3 });
         await nameInput.type(botName, { delay: 50 });
         console.log(`[GoogleMeetBot] Entered guest name: "${botName}"`);
-        await this.page.waitForTimeout(500);
+        await this._sleep(500);
         return;
       }
     } catch {
-      // Not found via placeholder
+      // Not found
     }
 
     // Fallback: aria-label
     try {
-      const nameInput = this.page.getByLabel("Your name");
-      if (await nameInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await nameInput.click();
-        await nameInput.fill("");
+      const nameInput = await this.page.waitForSelector(
+        'input[aria-label="Your name"]',
+        { timeout: 2000, visible: true }
+      );
+      if (nameInput) {
+        await nameInput.click({ clickCount: 3 });
         await nameInput.type(botName, { delay: 50 });
-        console.log(`[GoogleMeetBot] Entered guest name via label: "${botName}"`);
-        await this.page.waitForTimeout(500);
+        console.log(
+          `[GoogleMeetBot] Entered guest name via label: "${botName}"`
+        );
+        await this._sleep(500);
         return;
       }
     } catch {
-      // Not found via label
+      // Not found
     }
 
     // Last resort: any visible text input
     try {
-      const inputs = this.page.locator('input[type="text"]:visible, input:not([type]):visible');
-      const count = await inputs.count();
-      if (count > 0) {
-        await inputs.first().fill(botName);
+      const inputs = await this.page.$$('input[type="text"]');
+      if (inputs.length > 0) {
+        await inputs[0].click({ clickCount: 3 });
+        await inputs[0].type(botName, { delay: 50 });
         console.log("[GoogleMeetBot] Entered guest name via fallback input");
-        await this.page.waitForTimeout(500);
+        await this._sleep(500);
         return;
       }
     } catch {
       // No input found
     }
 
-    console.log("[GoogleMeetBot] No name input found (may not be in guest mode)");
+    console.log(
+      "[GoogleMeetBot] No name input found (may not be in guest mode)"
+    );
   }
 
   async _muteMediaBeforeJoin() {
     // Mute mic
     try {
-      const micBtn = this.page.getByRole("button", { name: /turn off microphone/i });
-      if (await micBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await micBtn.click();
-        console.log("[GoogleMeetBot] Muted microphone");
+      const micBtn = await this.page.$(
+        '[aria-label*="Turn off microphone"], [aria-label*="turn off microphone"], [data-tooltip*="Turn off microphone"]'
+      );
+      if (micBtn) {
+        const visible = await micBtn.boundingBox();
+        if (visible) {
+          await micBtn.click();
+          console.log("[GoogleMeetBot] Muted microphone");
+        }
       }
     } catch {
       // Already muted or not found
@@ -218,61 +388,73 @@ class GoogleMeetBot extends BaseBot {
 
     // Mute camera
     try {
-      const camBtn = this.page.getByRole("button", { name: /turn off camera/i });
-      if (await camBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await camBtn.click();
-        console.log("[GoogleMeetBot] Muted camera");
+      const camBtn = await this.page.$(
+        '[aria-label*="Turn off camera"], [aria-label*="turn off camera"], [data-tooltip*="Turn off camera"]'
+      );
+      if (camBtn) {
+        const visible = await camBtn.boundingBox();
+        if (visible) {
+          await camBtn.click();
+          console.log("[GoogleMeetBot] Muted camera");
+        }
       }
     } catch {
       // Already muted or not found
     }
 
-    await this.page.waitForTimeout(500);
+    await this._sleep(500);
   }
 
   async _clickJoinButton() {
-    // Playwright's text/role locators — try in order of specificity
-    const candidates = [
-      this.page.getByRole("button", { name: "Ask to join" }),
-      this.page.getByRole("button", { name: "Join now" }),
-      this.page.getByRole("button", { name: /join/i }),
-    ];
+    // Try specific button texts first, then broad fallback
+    const handle = await this._findButtonByText(["Join now", "Ask to join", "join"]);
+    const btn = handle ? handle.asElement() : null;
 
-    for (const locator of candidates) {
-      try {
-        if (await locator.isVisible({ timeout: 3000 }).catch(() => false)) {
-          await locator.click();
-          const text = await locator.textContent().catch(() => "join");
-          console.log(`[GoogleMeetBot] Clicked join button: "${text.trim()}"`);
-          await this.page.waitForTimeout(2000);
-          return;
-        }
-      } catch {
-        // Try next
+    if (btn) {
+      const visible = await btn.boundingBox();
+      if (visible) {
+        const text = await this.page.evaluate((el) => el.innerText.trim(), btn);
+        await btn.click();
+        console.log(`[GoogleMeetBot] Clicked join button: "${text}"`);
+        await this._sleep(2000);
+        return;
       }
     }
 
-    // Debug screenshot before failing
-    await this.page.screenshot({ path: `debug-no-join-btn-${this.meetingId}.png`, fullPage: true });
-    throw new Error("Could not find any join button — check debug-no-join-btn screenshot");
+    await this.page.screenshot({
+      path: `debug-no-join-btn-${this.meetingId}.png`,
+      fullPage: true,
+    });
+    throw new Error(
+      "Could not find any join button — check debug-no-join-btn screenshot"
+    );
   }
 
   async _waitForAdmission() {
     console.log("[GoogleMeetBot] Checking if waiting for host admission...");
 
-    const maxWait = 120000; // 2 minutes
+    const maxWait = 300000; // 5 minutes
     const pollInterval = 3000;
     const start = Date.now();
 
     while (Date.now() - start < maxWait) {
-      // Definitive: look for meeting control buttons
-      const leaveBtn = this.page.getByRole("button", { name: /leave call|end call/i });
-      if (await leaveBtn.isVisible().catch(() => false)) {
-        console.log("[GoogleMeetBot] Admitted to the meeting (found call controls)");
-        return;
+      // Check for leave/end call button (means we're in the meeting)
+      const inMeeting = await this.page.$(
+        '[aria-label="Leave call"], [aria-label="End call"], [data-tooltip="Leave call"]'
+      );
+      if (inMeeting) {
+        const visible = await inMeeting.boundingBox();
+        if (visible) {
+          console.log(
+            "[GoogleMeetBot] Admitted to the meeting (found call controls)"
+          );
+          return;
+        }
       }
 
-      const bodyText = await this.page.textContent("body");
+      const bodyText = await this.page.evaluate(
+        () => document.body.innerText
+      );
 
       // Check if denied or removed
       if (bodyText.includes("removed") || bodyText.includes("denied")) {
@@ -282,24 +464,44 @@ class GoogleMeetBot extends BaseBot {
       }
 
       // Still on waiting screen
-      if (bodyText.includes("Asking to be let in") || bodyText.includes("waiting")) {
+      if (
+        bodyText.includes("Asking to be let in") ||
+        bodyText.includes("waiting for the host")
+      ) {
         if ((Date.now() - start) % 15000 < pollInterval) {
-          console.log("[GoogleMeetBot] Still waiting for host to admit...");
+          console.log(
+            "[GoogleMeetBot] Still waiting for host to admit..."
+          );
         }
-        await this.page.waitForTimeout(pollInterval);
+        await this._sleep(pollInterval);
         continue;
       }
 
-      // Might already be in — check for common meeting text
-      if (bodyText.includes("Present now") || bodyText.includes("Leave call")) {
+      // Might already be in
+      if (
+        bodyText.includes("Present now") ||
+        bodyText.includes("Leave call") ||
+        bodyText.includes("You're in the meeting") ||
+        bodyText.includes("meeting details")
+      ) {
         console.log("[GoogleMeetBot] Admitted to the meeting");
         return;
       }
 
-      await this.page.waitForTimeout(pollInterval);
+      await this._sleep(pollInterval);
     }
 
-    const err = new Error("Timed out waiting for host to admit the bot (2 minutes).");
+    await this.page.screenshot({
+      path: `debug-admission-timeout-${this.meetingId}.png`,
+      fullPage: true,
+    });
+    console.log(
+      `[GoogleMeetBot] Admission timeout screenshot saved: debug-admission-timeout-${this.meetingId}.png`
+    );
+
+    const err = new Error(
+      "Timed out waiting for host to admit the bot (5 minutes)."
+    );
     err.noRetry = true;
     throw err;
   }
@@ -307,8 +509,54 @@ class GoogleMeetBot extends BaseBot {
   // --- Audio capture via WebRTC interception ---
 
   async _injectAudioInterceptor() {
-    // addInitScript runs BEFORE every page load — equivalent to Puppeteer's evaluateOnNewDocument
-    await this.context.addInitScript(() => {
+    await this.page.evaluateOnNewDocument(() => {
+      window.__meetAudioTracks = [];
+
+      const OriginalRTCPeerConnection = window.RTCPeerConnection;
+
+      window.RTCPeerConnection = function (...args) {
+        const pc = new OriginalRTCPeerConnection(...args);
+
+        pc.addEventListener("track", (event) => {
+          if (event.track.kind === "audio") {
+            console.log(
+              "[AudioInterceptor] Captured audio track:",
+              event.track.id
+            );
+            window.__meetAudioTracks.push(event.track);
+
+            window.dispatchEvent(
+              new CustomEvent("__newAudioTrack", {
+                detail: { track: event.track, streams: event.streams },
+              })
+            );
+          }
+        });
+
+        return pc;
+      };
+
+      window.RTCPeerConnection.prototype =
+        OriginalRTCPeerConnection.prototype;
+      Object.keys(OriginalRTCPeerConnection).forEach((key) => {
+        window.RTCPeerConnection[key] = OriginalRTCPeerConnection[key];
+      });
+      window.RTCPeerConnection.generateCertificate =
+        OriginalRTCPeerConnection.generateCertificate;
+    });
+  }
+
+  async _injectAudioInterceptorDirect() {
+    // Direct injection — patches RTCPeerConnection in the current page context
+    // This catches cases where evaluateOnNewDocument didn't fire
+    const alreadyPatched = await this.page.evaluate(() => !!window.__meetAudioTracks);
+    if (alreadyPatched) {
+      console.log("[GoogleMeetBot] WebRTC interceptor already active (evaluateOnNewDocument worked)");
+      return;
+    }
+
+    console.log("[GoogleMeetBot] Injecting WebRTC interceptor directly...");
+    await this.page.evaluate(() => {
       window.__meetAudioTracks = [];
 
       const OriginalRTCPeerConnection = window.RTCPeerConnection;
@@ -339,53 +587,155 @@ class GoogleMeetBot extends BaseBot {
       window.RTCPeerConnection.generateCertificate =
         OriginalRTCPeerConnection.generateCertificate;
     });
+    console.log("[GoogleMeetBot] WebRTC interceptor injected directly");
   }
 
   async _startAudioCapture() {
-    // Expose Node callback to the page context
+    // Use Chrome DevTools Protocol to capture tab audio directly
+    // This bypasses all WebRTC interception issues — captures whatever audio plays in the tab
+    const cdp = await this.page.target().createCDPSession();
+
+    // Start capturing tab audio as base64-encoded wav chunks
+    // We use Page.startScreencast alternative: Browser.grantPermissions + WebAudio
+    // Actually, the most reliable approach: use page.evaluate with getUserMedia + tab capture
+
     await this.page.exposeFunction("__onAudioChunk", (samples) => {
       const buffer = Buffer.from(new Int16Array(samples).buffer);
       this.onAudioData(buffer);
     });
 
-    await this.page.evaluate(() => {
-      const audioContext = new AudioContext({ sampleRate: 16000 });
-      const merger = audioContext.createChannelMerger(1);
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
-
-      processor.onaudioprocess = (e) => {
-        const data = e.inputBuffer.getChannelData(0);
-        const int16 = new Int16Array(data.length);
-        for (let i = 0; i < data.length; i++) {
-          int16[i] = Math.max(-32768, Math.min(32767, data[i] * 32768));
-        }
-        window.__onAudioChunk(Array.from(int16));
-      };
-
-      merger.connect(processor);
-      processor.connect(audioContext.destination);
-
-      function connectTrack(track) {
+    const captureStarted = await this.page.evaluate(() => {
+      return new Promise(async (resolve) => {
         try {
-          const stream = new MediaStream([track]);
+          // Use getDisplayMedia with audio to capture tab audio
+          // Chrome's --use-fake-ui-for-media-stream auto-accepts this
+          let stream;
+
+          // First try: capture audio from the current tab via getDisplayMedia
+          try {
+            stream = await navigator.mediaDevices.getDisplayMedia({
+              video: false,
+              audio: {
+                channelCount: 1,
+                sampleRate: 16000,
+              },
+            });
+          } catch (e1) {
+            console.log("[AudioCapture] getDisplayMedia failed:", e1.message);
+
+            // Second try: use Web Audio API to capture all audio context destinations
+            // Create an AudioContext and use createMediaStreamDestination
+            const audioContext = new AudioContext({ sampleRate: 16000 });
+
+            // Find all audio/video elements and connect them
+            const mediaElements = document.querySelectorAll("audio, video");
+            const destination = audioContext.createMediaStreamDestination();
+            let connected = 0;
+
+            mediaElements.forEach((el) => {
+              try {
+                if (el.srcObject || el.src) {
+                  const source = audioContext.createMediaElementSource(el);
+                  source.connect(destination);
+                  source.connect(audioContext.destination);
+                  connected++;
+                  console.log("[AudioCapture] Connected element:", el.tagName);
+                }
+              } catch (err) {
+                console.log("[AudioCapture] Skip element:", err.message);
+              }
+            });
+
+            if (connected > 0) {
+              stream = destination.stream;
+            } else {
+              console.log("[AudioCapture] No media elements found, trying WebRTC tracks...");
+              // Third try: use intercepted WebRTC tracks
+              const tracks = window.__meetAudioTracks || [];
+              if (tracks.length > 0) {
+                stream = new MediaStream(tracks);
+              }
+            }
+          }
+
+          if (!stream || stream.getAudioTracks().length === 0) {
+            console.log("[AudioCapture] No audio stream available");
+            resolve(false);
+            return;
+          }
+
+          console.log("[AudioCapture] Got audio stream with", stream.getAudioTracks().length, "tracks");
+
+          // Process the audio stream
+          const audioContext = new AudioContext({ sampleRate: 16000 });
           const source = audioContext.createMediaStreamSource(stream);
-          source.connect(merger);
-          console.log("[AudioCapture] Connected track:", track.id);
+          const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+          processor.onaudioprocess = (e) => {
+            const data = e.inputBuffer.getChannelData(0);
+            const int16 = new Int16Array(data.length);
+            for (let i = 0; i < data.length; i++) {
+              int16[i] = Math.max(-32768, Math.min(32767, data[i] * 32768));
+            }
+            window.__onAudioChunk(Array.from(int16));
+          };
+
+          source.connect(processor);
+          processor.connect(audioContext.destination);
+          window.__audioContext = audioContext;
+
+          console.log("[AudioCapture] Audio capture pipeline running");
+          resolve(true);
         } catch (err) {
-          console.error("[AudioCapture] Failed to connect track:", err);
+          console.error("[AudioCapture] Failed:", err.message);
+          resolve(false);
         }
-      }
-
-      (window.__meetAudioTracks || []).forEach(connectTrack);
-
-      window.addEventListener("__newAudioTrack", (e) => {
-        connectTrack(e.detail.track);
       });
-
-      window.__audioContext = audioContext;
     });
 
-    console.log("[GoogleMeetBot] Audio capture pipeline started (WebRTC interception)");
+    if (captureStarted) {
+      console.log("[GoogleMeetBot] Audio capture pipeline started");
+    } else {
+      console.log("[GoogleMeetBot] WARNING: Audio capture failed to start — trying fallback...");
+      // Fallback: poll for WebRTC tracks
+      await this._fallbackAudioCapture();
+    }
+  }
+
+  async _fallbackAudioCapture() {
+    // Poll for WebRTC tracks that may appear after joining
+    for (let i = 0; i < 10; i++) {
+      await this._sleep(3000);
+      const trackCount = await this.page.evaluate(() => (window.__meetAudioTracks || []).length);
+      console.log(`[GoogleMeetBot] Fallback polling... WebRTC tracks: ${trackCount}`);
+
+      if (trackCount > 0) {
+        await this.page.evaluate(() => {
+          const tracks = window.__meetAudioTracks;
+          const stream = new MediaStream(tracks);
+          const audioContext = new AudioContext({ sampleRate: 16000 });
+          const source = audioContext.createMediaStreamSource(stream);
+          const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+          processor.onaudioprocess = (e) => {
+            const data = e.inputBuffer.getChannelData(0);
+            const int16 = new Int16Array(data.length);
+            for (let i = 0; i < data.length; i++) {
+              int16[i] = Math.max(-32768, Math.min(32767, data[i] * 32768));
+            }
+            window.__onAudioChunk(Array.from(int16));
+          };
+
+          source.connect(processor);
+          processor.connect(audioContext.destination);
+          window.__audioContext = audioContext;
+          console.log("[AudioCapture] Fallback capture started with", tracks.length, "tracks");
+        });
+        console.log("[GoogleMeetBot] Fallback audio capture started");
+        return;
+      }
+    }
+    console.log("[GoogleMeetBot] WARNING: Could not capture any audio after 30 seconds");
   }
 
   // --- Anti-detection: random mouse movements ---
@@ -407,6 +757,49 @@ class GoogleMeetBot extends BaseBot {
     if (this._mouseMovementInterval) {
       clearInterval(this._mouseMovementInterval);
       this._mouseMovementInterval = null;
+    }
+  }
+
+  async _monitorMeetingEnd() {
+    const pollInterval = 5000;
+    console.log(`[GoogleMeetBot] Monitoring for meeting end: ${this.meetingId}`);
+
+    while (this.status === "in_meeting" && this.page) {
+      try {
+        const bodyText = await this.page.evaluate(() => document.body.innerText);
+
+        // Google Meet shows these when the meeting ends or the bot is removed
+        const endSignals = [
+          "You've been removed from the meeting",
+          "The meeting has ended",
+          "You left the meeting",
+          "Return to home screen",
+          "Returning to home screen",
+          "The video call ended",
+        ];
+
+        const ended = endSignals.some((signal) => bodyText.includes(signal));
+        if (ended) {
+          console.log(`[GoogleMeetBot] Meeting ended detected for ${this.meetingId}`);
+          if (this._meetingEndCallback) {
+            this._meetingEndCallback(this.meetingId);
+          } else {
+            await this.leave();
+          }
+          return;
+        }
+
+        // Also check if browser/page was closed externally
+      } catch (err) {
+        // Page likely closed or crashed — meeting is over
+        console.log(`[GoogleMeetBot] Page closed/crashed for ${this.meetingId}: ${err.message}`);
+        if (this._meetingEndCallback) {
+          this._meetingEndCallback(this.meetingId);
+        }
+        return;
+      }
+
+      await this._sleep(pollInterval);
     }
   }
 

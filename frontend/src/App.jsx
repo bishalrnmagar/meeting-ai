@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { useCaptions } from "./hooks/useCaptions";
 import CaptionOverlay from "./components/CaptionOverlay";
 import MeetingStatus from "./components/MeetingStatus";
+import SpeakingIndicator from "./components/SpeakingIndicator";
 
 const styles = {
   header: {
@@ -64,7 +65,7 @@ export default function App() {
   const [activeMeetingId, setActiveMeetingId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const { captions, connected, participantCount } = useCaptions(activeMeetingId);
+  const { captions, connected, participantCount, isSpeaking, activeSpeaker } = useCaptions(activeMeetingId);
 
   const handleJoin = async (e) => {
     e.preventDefault();
@@ -130,6 +131,10 @@ export default function App() {
             meetingId={activeMeetingId}
             connected={connected}
             participantCount={participantCount}
+          />
+          <SpeakingIndicator
+            isSpeaking={isSpeaking}
+            activeSpeaker={activeSpeaker}
           />
           <CaptionOverlay captions={captions} />
         </>

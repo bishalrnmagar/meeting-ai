@@ -25,6 +25,28 @@ async function startBot(meetingId, meetingUrl, platform) {
   const bot = createBot(platform, meetingUrl, meetingId);
   sessionStore.set(meetingId, bot);
 
+  // Auto-cleanup when meeting ends
+  if (bot.onMeetingEnd) {
+    bot.onMeetingEnd(async (id) => {
+      console.log(`[BotManager] Meeting ended detected, cleaning up: ${id}`);
+      try {
+        await bot.leave();
+      } catch { /* already left */ }
+      sessionStore.delete(id);
+
+      // Notify Python API
+      try {
+        await fetch(`${config.pythonApiUrl}/internal/captions/${id}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ event: "meeting.ended" }),
+        });
+      } catch (err) {
+        console.error("[BotManager] Failed to notify Python API of meeting end:", err.message);
+      }
+    });
+  }
+
   // Retry logic with exponential backoff
   let lastError;
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {

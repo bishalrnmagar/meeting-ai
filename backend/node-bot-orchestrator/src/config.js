@@ -9,4 +9,6 @@ module.exports = {
   googleMeetHeadless: process.env.GOOGLE_MEET_HEADLESS === "true",
   pythonApiUrl: process.env.PYTHON_API_URL || "http://localhost:8000",
   googleBotName: process.env.GOOGLE_BOT_NAME || "Meeting Assistant",
+  googleBotEmail: process.env.GOOGLE_BOT_EMAIL || "",
+  googleBotPassword: process.env.GOOGLE_BOT_PASSWORD || "",
 };
