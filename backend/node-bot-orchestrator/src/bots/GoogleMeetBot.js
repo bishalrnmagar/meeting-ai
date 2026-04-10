@@ -54,9 +54,6 @@ class GoogleMeetBot extends BaseBot {
       "notifications",
     ]);
 
-    // Sign into Google account if credentials are available and not already signed in
-    await this._signInIfNeeded();
-
     // Inject WebRTC interceptor via evaluateOnNewDocument (runs on next navigation)
     await this._injectAudioInterceptor();
 
@@ -75,7 +72,7 @@ class GoogleMeetBot extends BaseBot {
 
     // Debug screenshot
     await this.page.screenshot({
-      path: `debug-meet-${this.meetingId}.png`,
+      path: `debug-screenshots/debug-meet-${this.meetingId}.png`,
       fullPage: true,
     });
     console.log(
@@ -88,10 +85,7 @@ class GoogleMeetBot extends BaseBot {
 
     await this._checkBlocked();
     await this._dismissDialogs();
-    // Only enter guest name if not signed in
-    if (!config.googleBotEmail || !config.googleBotPassword) {
-      await this._enterGuestName();
-    }
+    await this._enterGuestName();
     await this._muteMediaBeforeJoin();
     await this._clickJoinButton();
     // Re-check for blocks after clicking join
@@ -142,72 +136,6 @@ class GoogleMeetBot extends BaseBot {
       }
       return null;
     }, texts);
-  }
-
-  async _signInIfNeeded() {
-    if (!config.googleBotEmail || !config.googleBotPassword) {
-      console.log("[GoogleMeetBot] No Google credentials configured, joining as guest");
-      return;
-    }
-
-    // Check if already signed in by visiting Google
-    await this.page.goto("https://accounts.google.com", {
-      waitUntil: "networkidle2",
-      timeout: 20000,
-    });
-
-    const currentUrl = this.page.url();
-    // If redirected to myaccount or shows signed-in state, skip login
-    if (currentUrl.includes("myaccount.google.com") || currentUrl.includes("accounts.google.com/SignOutOptions")) {
-      console.log("[GoogleMeetBot] Already signed into Google");
-      return;
-    }
-
-    console.log("[GoogleMeetBot] Signing into Google account...");
-
-    try {
-      // Go to sign-in page
-      await this.page.goto("https://accounts.google.com/signin", {
-        waitUntil: "networkidle2",
-        timeout: 20000,
-      });
-
-      // Enter email
-      const emailInput = await this.page.waitForSelector('input[type="email"]', {
-        timeout: 10000,
-        visible: true,
-      });
-      await emailInput.type(config.googleBotEmail, { delay: 30 });
-      await this._sleep(500);
-
-      // Click Next
-      const nextHandle = await this._findButtonByText("Next");
-      const nextBtn = nextHandle ? nextHandle.asElement() : null;
-      if (nextBtn) await nextBtn.click();
-      await this._sleep(3000);
-
-      // Enter password
-      const passInput = await this.page.waitForSelector('input[type="password"]', {
-        timeout: 10000,
-        visible: true,
-      });
-      await passInput.type(config.googleBotPassword, { delay: 30 });
-      await this._sleep(500);
-
-      // Click Next again
-      const nextHandle2 = await this._findButtonByText("Next");
-      const nextBtn2 = nextHandle2 ? nextHandle2.asElement() : null;
-      if (nextBtn2) await nextBtn2.click();
-
-      // Wait for sign-in to complete
-      await this.page.waitForNavigation({ waitUntil: "networkidle2", timeout: 15000 }).catch(() => {});
-      await this._sleep(2000);
-
-      console.log(`[GoogleMeetBot] Signed in as ${config.googleBotEmail}`);
-    } catch (err) {
-      console.error(`[GoogleMeetBot] Google sign-in failed: ${err.message}`);
-      console.log("[GoogleMeetBot] Proceeding as guest...");
-    }
   }
 
   async _waitForMeetReady() {
@@ -279,7 +207,7 @@ class GoogleMeetBot extends BaseBot {
         }
 
         console.log(`[GoogleMeetBot] _checkBlocked: BLOCKED — "${text}"`);
-        await this.page.screenshot({ path: `debug-blocked-${this.meetingId}.png`, fullPage: true });
+        await this.page.screenshot({ path: `debug-screenshots/debug-blocked-${this.meetingId}.png`, fullPage: true });
         const err = new Error(msg);
         err.noRetry = true;
         throw err;
@@ -422,7 +350,7 @@ class GoogleMeetBot extends BaseBot {
     }
 
     await this.page.screenshot({
-      path: `debug-no-join-btn-${this.meetingId}.png`,
+      path: `debug-screenshots/debug-no-join-btn-${this.meetingId}.png`,
       fullPage: true,
     });
     throw new Error(
@@ -492,7 +420,7 @@ class GoogleMeetBot extends BaseBot {
     }
 
     await this.page.screenshot({
-      path: `debug-admission-timeout-${this.meetingId}.png`,
+      path: `debug-screenshots/debug-admission-timeout-${this.meetingId}.png`,
       fullPage: true,
     });
     console.log(
